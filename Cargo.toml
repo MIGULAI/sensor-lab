@@ -1,0 +1,33 @@
+[package]
+name = "sensor-lab"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Core / runtime
+cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7.5"
+ 
+# Async runtime (RTIC v2: interrupt-driven async executors, no Embassy)
+rtic = { version = "~2.3", features = ["thumbv7-backend"] }
+rtic-monotonics = { version = "~2.2", features = ["cortex-m-systick"] }
+ 
+# Register access
+stm32f4 = { version = "0.16", features = ["stm32f411"] }   # PAC only: register definitions, no HAL
+ 
+# Logging over RTT (probe-rs)
+defmt = "1.0"
+defmt-rtt = "1.0"
+panic-probe = { version = "1.0", features = ["print-defmt"] }
+rtic-sync = "1"
+ 
+[profile.dev]
+opt-level = 1
+debug = 2
+ 
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+debug = 2
+incremental = false
