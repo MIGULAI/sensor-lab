@@ -20,6 +20,10 @@ defmt = "1.0"
 defmt-rtt = "1.0"
 panic-probe = { version = "1.0", features = ["print-defmt"] }
 rtic-sync = "1"
+
+embedded-graphics = "0.8"
+heapless = "0.8"   # fixed-capacity String for formatting numbers, no heap
+
  
 [profile.dev]
 opt-level = 1

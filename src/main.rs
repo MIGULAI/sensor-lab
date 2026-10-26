@@ -6,6 +6,9 @@ mod gpio;
 mod i2c;
 mod rcc;
 mod spi;
+mod state;
+mod tasks;
+mod screens;
 
 use defmt_rtt as _;
 use panic_probe as _;
@@ -19,8 +22,12 @@ systick_monotonic!(Mono, 1_000);
 mod app {
     use super::*;
     use crate::{
-        bsp::{Initialized, bmp280::{MeasurementConfig, driver::BMP280}, led::Led, sht40::{Precision, driver::SHT40, measurement}},
-        gpio::Port, rcc::{APB1_I2C1, Rcc},
+        bsp::{Initialized, led::Led},
+        gpio::Port,
+        rcc::{APB1_I2C1, APB1_TIM2, Rcc},
+        state::State,
+        // Task bodies live in `tasks/`; RTIC calls them by these names from inside `app`.
+        tasks::{bmp280::bmp280_task, display::display_task, led::blink, sht40::sht40_task},
     };
     use rtic_sync::arbiter::Arbiter;
     use stm32f4::stm32f411 as pac;
@@ -29,6 +36,7 @@ mod app {
     #[shared]
     struct Shared {
         rcc: Rcc,
+        state: State,
     }
 
     #[local]
@@ -37,6 +45,8 @@ mod app {
         // SHT40 and BMP280 share I2C1; the Arbiter is an async mutex that can be held across `.await`.
         sht40_bus: &'static Arbiter<pac::I2C1>,
         bmp280_bus: &'static Arbiter<pac::I2C1>,
+        display_bus: &'static Arbiter<pac::I2C1>,
+        tim2: pac::TIM2, // free-running 1 MHz counter for CPU load measurement in idle
     }
 
     #[init(local = [i2c_bus: Option<Arbiter<pac::I2C1>> = None])]
@@ -51,78 +61,88 @@ mod app {
 
         spi::init(&dp.RCC, &dp.SPI1);
 
+        // Keeps the AHB bus matrix clocked during WFI, so the debugger's RAM reads (RTT) don't fail.
+        dp.RCC.ahb1enr().modify(|_, w| w.dma1en().set_bit());
+
         let mut rcc = Rcc::new(dp.RCC);
         rcc.enable_reset_apb1(APB1_I2C1);
         i2c::init(&dp.I2C1);
         let i2c_bus: &'static Arbiter<pac::I2C1> = cx.local.i2c_bus.insert(Arbiter::new(dp.I2C1));
 
+        // TIM2: 32-bit, keeps counting while the core sleeps in WFI (unlike the DWT cycle counter).
+        rcc.enable_reset_apb1(APB1_TIM2);
+        let tim2 = dp.TIM2;
+        tim2.psc().write(|w| unsafe { w.bits(99) }); // 100 MHz timer clock (2 x APB1) / 100 = 1 MHz
+        tim2.arr().write(|w| unsafe { w.bits(u32::MAX) }); // free-running over the full 32 bits
+        tim2.egr().write(|w| w.ug().set_bit()); // load the prescaler now, not at the first overflow
+        tim2.cr1().modify(|_, w| w.cen().set_bit());
+
+        // Keep the debug connection (RTT/defmt) alive while the core sleeps in WFI.
+        dp.DBGMCU.cr().modify(|_, w| w.dbg_sleep().set_bit());
+
+        let state: State = State {
+            bmp280_state: None,
+            sht40_state: None,
+        };
         defmt::info!("init done");
         blink::spawn().ok();
         sht40_task::spawn().ok();
         bmp280_task::spawn().ok();
+        display_task::spawn().ok();
 
         (
-            Shared { rcc },
+            Shared { rcc, state },
             Local {
                 led,
                 sht40_bus: i2c_bus,
                 bmp280_bus: i2c_bus,
+                display_bus: i2c_bus,
+                tim2,
             },
         )
     }
 
-    #[task(local = [led])]
-    async fn blink(cx: blink::Context) {
+    // Runs whenever no task or interrupt is ready. CPU load = 1 - (time asleep / time elapsed).
+    #[idle(local = [tim2])]
+    fn idle(cx: idle::Context) -> ! {
+        let tim = cx.local.tim2;
+        let now = || tim.cnt().read().bits(); // µs, wraps every ~71 min; wrapping_sub handles it
+        let mut window_start = now();
+        let mut sleep_us: u32 = 0;
+
         loop {
-            cx.local.led.toggle();
-            Mono::delay(500.millis()).await;
+            // With interrupts masked, WFI still wakes on a pending IRQ, but its handler runs only
+            // after `enable()`, so the handler's time isn't counted as sleep.
+            cortex_m::interrupt::disable();
+            let t0 = now();
+            cortex_m::asm::wfi();
+            let t1 = now();
+            unsafe { cortex_m::interrupt::enable() };
+            sleep_us += t1.wrapping_sub(t0);
+
+            let elapsed = t1.wrapping_sub(window_start);
+            if elapsed >= 1_000_000 {
+                let load = 100.0 * (1.0 - sleep_us as f32 / elapsed as f32);
+                defmt::info!("CPU load: {=f32} %", load);
+                window_start = t1;
+                sleep_us = 0;
+            }
         }
     }
 
-    #[task(local = [sht40_bus])]
-    async fn sht40_task(cx: sht40_task::Context) {
-        let sht40 = match SHT40::new(*cx.local.sht40_bus).init().await {
-            Ok(sht40) => sht40,
-            Err(e) => {
-                defmt::error!("SHT40: failed to initialize: {:?}", e);
-                return;
-            }
-        };
-        defmt::info!("SHT40: serial number: {=u32:#x}", sht40.serial);
-        loop {
-            let measurement = sht40.get_temperature_humidity(Precision::High).await;
-            if let Ok(measurement) = measurement {
-                defmt::info!("SHT40: temp {=f32}, hum {=f32}", measurement.temperature_celsius(), measurement.humidity_percent());
-            } else {
-                defmt::error!("SHT40: failed to get measurement: {:?}", measurement.err().unwrap());
-            }
-            Mono::delay(1000.millis()).await;
-        }
-    }
+    extern "Rust" {
+        // priority = 1: tasks run from the EXTI0 dispatcher. The default (0) runs them in the
+        // idle loop, which isn't allowed once a custom `#[idle]` exists.
+        #[task(local = [led], priority = 1)]
+        async fn blink(cx: blink::Context<'_>);
 
-    #[task(local = [bmp280_bus], shared = [rcc])]
-    async fn bmp280_task(cx: bmp280_task::Context) {
-        let bus = *cx.local.bmp280_bus;
-        let bmp280 = match BMP280::new(bus).init().await {
-            Ok(bmp280) => bmp280,
-            Err(e) => {
-                defmt::error!("BMP280: failed to initialize: {:?}", e);
-                return;
-            }
-        };
-        defmt::info!("BMP280: chip ID: {=u8:#x}", bmp280.chip_id);
-        let config = MeasurementConfig::weather_monitoring();
-        bmp280.set_configuration(config).await.ok();
-        defmt::info!("BMP280: set configuration: {:?}", config);
-        loop {
-            bmp280.start_measurement(config).await.ok();
-            let measurement = bmp280.get_temperature_pressure().await;
-            if let Ok((temp, pressure)) = measurement {
-                defmt::info!("BMP280: temp {=f32}, pressure {=f32}", temp, pressure);
-            } else {
-                defmt::error!("BMP280: failed to get measurement: {:?}", measurement.err().unwrap());
-            }
-            Mono::delay(1000.millis()).await;
-        }
+        #[task(local = [sht40_bus], shared = [state], priority = 1)]
+        async fn sht40_task(cx: sht40_task::Context<'_>);
+
+        #[task(local = [bmp280_bus], shared = [state], priority = 1)]
+        async fn bmp280_task(cx: bmp280_task::Context<'_>);
+
+        #[task(local = [display_bus], shared = [state], priority = 1)]
+        async fn display_task(cx: display_task::Context<'_>);
     }
 }

@@ -14,6 +14,7 @@ pub const SYSCLK_HZ: u32 = 100_000_000;
 pub const APB1_HZ: u32 = 50_000_000;
 pub const APB2_HZ: u32 = 100_000_000;
 
+pub const APB1_TIM2: u32 = 0;
 pub const APB1_I2C1: u32 = 21;
 pub const APB2_SPI1: u32 = 12;
 

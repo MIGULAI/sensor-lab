@@ -5,9 +5,7 @@ use rtic_sync::arbiter::Arbiter;
 use stm32f4::stm32f411::I2C1;
 
 use crate::{
-    Mono,
-    bsp::{Initialized, Uninitialized, bmp280::MeasurementConfig},
-    i2c,
+    Mono, bsp::{Initialized, Uninitialized, bmp280::{Measurement, MeasurementConfig}}, i2c,
 };
 
 pub struct Trimming {
@@ -202,7 +200,7 @@ impl<'a> BMP280<'a, Initialized> {
         Ok(())
     }
 
-    pub async fn get_temperature_pressure(&self) -> Result<(f32, f32), i2c::I2CError> {
+    pub async fn get_temperature_pressure(&self) -> Result<Measurement, i2c::I2CError> {
         let buf = self.call::<6>(0xF7, 10).await?;
         let adc_p = ((buf[0] as u32) << 12) | ((buf[1] as u32) << 4) | ((buf[2] as u32) >> 4);
         let adc_t = ((buf[3] as u32) << 12) | ((buf[4] as u32) << 4) | ((buf[5] as u32) >> 4);
@@ -210,6 +208,9 @@ impl<'a> BMP280<'a, Initialized> {
         let (temperature, t_fine) = self.compensate_temperature(adc_t);
         let pressure = self.compensate_pressure(adc_p, t_fine);
 
-        Ok((temperature, pressure))
+        Ok(Measurement {
+            temperature,
+            pressure,
+        })
     }
 }

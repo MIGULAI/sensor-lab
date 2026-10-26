@@ -1,3 +1,4 @@
+#[derive(Clone)]
 pub struct SHT40Measurement {
     pub temperature: u16,
     pub humidity: u16,

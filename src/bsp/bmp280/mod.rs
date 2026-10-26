@@ -3,6 +3,12 @@
 
 pub mod driver;
 
+#[derive(Clone)]
+pub struct Measurement{
+    pub temperature: f32, // °C
+    pub pressure: f32,    // Pa
+}
+
 #[derive(Clone, Copy, Debug, defmt::Format)]
 pub struct MeasurementConfig {
     pub temperature_oversampling: Oversampling,
