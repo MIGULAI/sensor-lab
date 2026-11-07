@@ -3,21 +3,24 @@ use rtic::Mutex; // needed for `.lock()` outside the app module
 use rtic_monotonics::systick::prelude::*;
 
 pub async fn sht40_task(mut cx: sht40_task::Context<'_>) {
-    let sht40 = match SHT40::new(*cx.local.sht40_bus).init().await {
-        Ok(sht40) => sht40,
-        Err(e) => {
-            defmt::error!("SHT40: failed to initialize: {:?}", e);
-            cx.shared.state.lock(|state| {
-                state.sht40_state = Some(SensorState {
-                    measurements: None,
-                    last_measurement_time: None,
-                    id: None,
-                    healthy: false,
-                    error: true,
-                    config: None,
+    // Retry until the sensor answers: it may be unplugged, or the bus glitched at boot.
+    let sht40 = loop {
+        match SHT40::new(*cx.local.sht40_bus).init().await {
+            Ok(sht40) => break sht40,
+            Err(e) => {
+                defmt::error!("SHT40: failed to initialize: {:?}", e);
+                cx.shared.state.lock(|state| {
+                    state.sht40_state = Some(SensorState {
+                        measurements: None,
+                        last_measurement_time: None,
+                        id: None,
+                        healthy: false,
+                        error: true,
+                        config: None,
+                    });
                 });
-            });
-            return;
+                Mono::delay(1000.millis()).await;
+            }
         }
     };
     cx.shared.state.lock(|state| {

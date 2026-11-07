@@ -1,8 +1,15 @@
 use embedded_graphics::{pixelcolor::BinaryColor, prelude::*};
 
-pub const WIDTH: usize = 128;
-pub const HEIGHT: usize = 64;
-pub type Frame = [u8; WIDTH * HEIGHT / 8];
+use crate::bsp::ssd1306_display::constants;
+
+
+pub type Frame = [u8; constants::SSD1306_BUFFER_SIZE + 1]; // +1 for control byte at index 0
+
+const fn pixel_pos(x: i32, y: i32) -> (usize, u8) {
+    let byte_index = (y as usize / 8) * constants::SSD1306_WIDTH  + x as usize + 1; // +1 for control byte at index 0
+    let bit_mask = 1 << (y as usize % 8);
+    (byte_index, bit_mask)
+}
 
 const fn in_circle(x: i32, y: i32, cx: i32, cy: i32, r: i32) -> bool {
     let (dx, dy) = (x - cx, y - cy);
@@ -34,13 +41,15 @@ const fn angry_pixel(x: i32, y: i32) -> bool {
 }
 
 pub const fn angry_face() -> Frame {
-    let mut fb = [0u8; WIDTH * HEIGHT / 8];
+    let mut fb = [0u8; constants::SSD1306_BUFFER_SIZE + 1];
+    fb[0] = constants::SSD1306_CONTROL_BYTE_DATA; // control byte for data
     let mut y = 0;
-    while y < HEIGHT {
+    while y < constants::SSD1306_HEIGHT {
         let mut x = 0;
-        while x < WIDTH {
+        while x < constants::SSD1306_WIDTH {
             if angry_pixel(x as i32, y as i32) {
-                fb[(y / 8) * WIDTH + x] |= 1 << (y % 8);
+                let (fb_index, bit_mask) = pixel_pos(x as i32, y as i32);
+                fb[fb_index] |= bit_mask;
             }
             x += 1;
         }
@@ -53,13 +62,15 @@ pub struct FrameBuffer(pub Frame);
 
 impl FrameBuffer {
     pub const fn new() -> Self {
-        Self([0; WIDTH * HEIGHT / 8])
+        let mut fb = [0u8; constants::SSD1306_BUFFER_SIZE + 1];
+        fb[0] = constants::SSD1306_CONTROL_BYTE_DATA; // control byte for data
+        Self(fb)
     }
 }
 
 impl OriginDimensions for FrameBuffer {
     fn size(&self) -> Size {
-        Size::new(WIDTH as u32, HEIGHT as u32)
+        Size::new(constants::SSD1306_WIDTH as u32, constants::SSD1306_HEIGHT as u32)
     }
 }
 
@@ -72,14 +83,14 @@ impl DrawTarget for FrameBuffer {
         pixels: I,
     ) -> Result<(), Self::Error> {
         for Pixel(Point { x, y }, color) in pixels {
-            if (0..WIDTH as i32).contains(&x) && (0..HEIGHT as i32).contains(&y) {
+            if (0..constants::SSD1306_WIDTH as i32).contains(&x) && (0..constants::SSD1306_HEIGHT as i32).contains(&y) {
                 let (x, y) = (x as usize, y as usize);
-                let byte = &mut self.0[(y / 8) * WIDTH + x];
-                let bit = 1 << (y % 8);
+                let (byte_index, bit_mask) = pixel_pos(x as i32, y as i32);
+                let byte = &mut self.0[byte_index];
                 if color.is_on() {
-                    *byte |= bit
+                    *byte |= bit_mask;
                 } else {
-                    *byte &= !bit
+                    *byte &= !bit_mask;
                 }
             }
         }

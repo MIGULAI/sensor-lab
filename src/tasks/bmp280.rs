@@ -12,21 +12,24 @@ use rtic_monotonics::systick::prelude::*;
 
 pub async fn bmp280_task(mut cx: bmp280_task::Context<'_>) {
     let bus = *cx.local.bmp280_bus;
-    let bmp280 = match BMP280::new(bus).init().await {
-        Ok(bmp280) => bmp280,
-        Err(e) => {
-            defmt::error!("BMP280: failed to initialize: {:?}", e);
-            cx.shared.state.lock(|state| {
-                state.bmp280_state = Some(SensorState {
-                    measurements: None,
-                    last_measurement_time: None,
-                    id: None,
-                    healthy: false,
-                    error: true,
-                    config: None,
+    // Retry until the sensor answers: it may be unplugged, or the bus glitched at boot.
+    let bmp280 = loop {
+        match BMP280::new(*&bus).init().await {
+            Ok(bmp280) => break bmp280,
+            Err(e) => {
+                defmt::error!("BMP280: failed to initialize: {:?}", e);
+                cx.shared.state.lock(|state| {
+                    state.bmp280_state = Some(SensorState {
+                        measurements: None,
+                        last_measurement_time: None,
+                        id: None,
+                        healthy: false,
+                        error: true,
+                        config: None,
+                    });
                 });
-            });
-            return;
+                Mono::delay(1000.millis()).await;
+            }
         }
     };
     let config = MeasurementConfig::weather_monitoring();

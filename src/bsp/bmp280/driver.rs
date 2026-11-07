@@ -2,10 +2,10 @@ use core::marker::PhantomData;
 
 use rtic_monotonics::systick::prelude::*;
 use rtic_sync::arbiter::Arbiter;
-use stm32f4::stm32f411::I2C1;
+use crate::i2c::I2cBus;
 
 use crate::{
-    Mono, bsp::{Initialized, Uninitialized, bmp280::{Measurement, MeasurementConfig}}, i2c,
+    Mono, bsp::{I2CPeripheral, Initialized, Uninitialized, bmp280::{Measurement, MeasurementConfig}}, i2c
 };
 
 pub struct Trimming {
@@ -23,53 +23,30 @@ pub struct Trimming {
     pub dig_p9: i16,
 }
 
-pub struct BMP280<'a, State> {
+pub struct BMP280<State> {
     _state: PhantomData<State>,
-    pub bus: &'a Arbiter<I2C1>,
     pub chip_id: u8,
     pub trimming: Trimming,
+    inner: I2CPeripheral,
 }
 
-pub struct BMP280Measurement {
-    pub temperature: Option<f32>,
-    pub pressure: f32,
-}
+const BMP280_I2C_ADDR: u8 = 0x76;
+const BMP280_CHIP_ID: u8 = 0x58;
 
-impl<'a, State> BMP280<'a, State> {
-    // `delay_ms`: time to wait between command and read-back (measurement/heater duration).
-    // The bus is only held for the write and the read, so other devices can use it while the sensor measures.
-    // `N`: number of bytes to read back, chosen by the caller at compile time.
-    async fn call<const N: usize>(
-        &self,
-        command: u8,
-        delay_ms: u32,
-    ) -> Result<[u8; N], i2c::I2CError> {
-        let result = i2c::write_byte(&*self.bus.access().await, 0x76, command);
-        if let Err(e) = result {
-            defmt::error!("BMP280: write error: {:?}", e);
-            return Err(e);
-        } else {
-            Mono::delay(delay_ms.millis()).await;
-            let mut buf = [0u8; N];
-            match i2c::read(&*self.bus.access().await, 0x76, &mut buf) {
-                Ok(()) => {
-                    return Ok(buf);
-                }
-                Err(e) => {
-                    return Err(e);
-                }
-            }
-        }
-    }
-}
+// BMP280 registers
+const REG_ID: u8 = 0xD0;
+const REG_TRIMMING: u8 = 0x88;
+const REG_CONFIG: u8 = 0xF5;
+const REG_CTRL_MEAS: u8 = 0xF4;
+const REG_PRESSURE_MSB: u8 = 0xF7;
 
-impl<'a> BMP280<'a, Uninitialized> {
-    async fn get_chip_id(&self) -> Result<u8, i2c::I2CError> {
-        self.call::<1>(0xD0, 0).await.map(|buf| buf[0])
+impl BMP280<Uninitialized> {
+        async fn get_chip_id(&self) -> Result<u8, i2c::I2CError> {
+        self.inner.call::<1>(REG_ID, 0).await.map(|buf| buf[0])
     }
 
     async fn get_trimming(&self) -> Result<Trimming, i2c::I2CError> {
-        self.call::<24>(0x88, 0).await.map(|buf| {
+        self.inner.call::<24>(REG_TRIMMING, 0).await.map(|buf| {
             let dig_t1 = u16::from_le_bytes([buf[0], buf[1]]);
             let dig_t2 = i16::from_le_bytes([buf[2], buf[3]]);
             let dig_t3 = i16::from_le_bytes([buf[4], buf[5]]);
@@ -100,10 +77,10 @@ impl<'a> BMP280<'a, Uninitialized> {
         })
     }
 
-    pub fn new(bus: &'a Arbiter<I2C1>) -> Self {
+    pub fn new(bus: &'static Arbiter<I2cBus>) -> Self {
         BMP280 {
             _state: PhantomData::<Uninitialized>,
-            bus,
+            inner: I2CPeripheral::new(bus, BMP280_I2C_ADDR),
             chip_id: 0,
             trimming: Trimming {
                 dig_t1: 0,
@@ -123,7 +100,7 @@ impl<'a> BMP280<'a, Uninitialized> {
     }
 
     // Consumes the uninitialized driver and returns the initialized one.
-    pub async fn init(self) -> Result<BMP280<'a, Initialized>, i2c::I2CError> {
+    pub async fn init(self) -> Result<BMP280<Initialized>, i2c::I2CError> {
         let chip_id = match self.get_chip_id().await {
             Ok(chip_id) => chip_id,
             Err(e) => {
@@ -131,7 +108,7 @@ impl<'a> BMP280<'a, Uninitialized> {
                 return Err(e);
             }
         };
-        if chip_id != 0x58 {
+        if chip_id != BMP280_CHIP_ID {
             defmt::error!("BMP280: unexpected chip ID: {=u8:#x}", chip_id);
             return Err(i2c::I2CError::UnexpectedDevice);
         }
@@ -146,14 +123,14 @@ impl<'a> BMP280<'a, Uninitialized> {
 
         Ok(BMP280 {
             _state: PhantomData::<Initialized>,
-            bus: self.bus,
+            inner: self.inner,
             chip_id,
             trimming: trimming,
         })
     }
 }
 
-impl<'a> BMP280<'a, Initialized> {
+impl BMP280<Initialized> {
     fn compensate_temperature(&self, adc_t: u32) -> (f32, u32) {
         let var1 = (((adc_t >> 3) - ((self.trimming.dig_t1 as u32) << 1))
             * (self.trimming.dig_t2 as u32))
@@ -189,19 +166,19 @@ impl<'a> BMP280<'a, Initialized> {
         pressure as f32 / 256.0
     }
     pub async fn set_configuration(&self, config: MeasurementConfig) -> Result<(), i2c::I2CError> {
-        i2c::write(&*self.bus.access().await, 0x76, &[0xF5, config.config()])?;
+        self.inner.write(&[REG_CONFIG, config.config()]).await?;
         Ok(())
     }
 
     pub async fn start_measurement(&self, config: MeasurementConfig) -> Result<(), i2c::I2CError> {
-        i2c::write(&*self.bus.access().await, 0x76, &[0xF4, config.ctrl_meas()])?;
+        self.inner.write(&[REG_CTRL_MEAS, config.ctrl_meas()]).await?;
         // Forced-mode conversion at x1/x1 takes up to 6.4 ms (datasheet table 13).
         Mono::delay((config.max_measurement_time_us() / 1000 + 1).millis()).await;
         Ok(())
     }
 
     pub async fn get_temperature_pressure(&self) -> Result<Measurement, i2c::I2CError> {
-        let buf = self.call::<6>(0xF7, 10).await?;
+        let buf = self.inner.call::<6>(REG_PRESSURE_MSB, 0).await?;
         let adc_p = ((buf[0] as u32) << 12) | ((buf[1] as u32) << 4) | ((buf[2] as u32) >> 4);
         let adc_t = ((buf[3] as u32) << 12) | ((buf[4] as u32) << 4) | ((buf[5] as u32) >> 4);
 

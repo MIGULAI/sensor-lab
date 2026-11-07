@@ -93,6 +93,11 @@ pub fn set_low(port: Port, pin: u8) {
     port.regs().bsrr().write(|w| unsafe { w.bits(1 << (pin + 16)) });
 }
 
+/// Reads the pin level from IDR (also valid while the pin is an output, e.g. open-drain).
+pub fn is_high(port: Port, pin: u8) -> bool {
+    port.regs().idr().read().bits() & (1 << pin) != 0
+}
+
 pub fn toggle(port: Port, pin: u8) {
     let g = port.regs();
     if g.odr().read().bits() & (1 << pin) != 0 {

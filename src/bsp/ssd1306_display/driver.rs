@@ -1,52 +1,21 @@
 use core::marker::PhantomData;
 
-use rtic_monotonics::systick::prelude::*;
 use rtic_sync::arbiter::Arbiter;
-use stm32f4::stm32f411::I2C1;
+use crate::i2c::I2cBus;
 
 use crate::{
-    Mono,
-    bsp::{Initialized, Uninitialized, ssd1306_display::drawings},
-    i2c,
+    bsp::{I2CPeripheral, Initialized, Uninitialized, ssd1306_display::{constants::{SSD1306_I2C_ADDR, SSD1306_SET_FULL_WINDOW}, drawings}}, i2c,
 };
 
-pub struct SSD1306Display<'a, State> {
+pub struct SSD1306Display<State> {
     _state: PhantomData<State>,
-    pub bus: &'a Arbiter<I2C1>,
+    inner: I2CPeripheral,
 }
 
-impl<'a, State> SSD1306Display<'a, State> {
-    async fn call<const N: usize>(
-        &self,
-        command: u8,
-        delay_ms: u32,
-    ) -> Result<[u8; N], crate::i2c::I2CError> {
-        let result = crate::i2c::write_byte(&*self.bus.access().await, 0x3C, command);
-        if let Err(e) = result {
-            defmt::error!("Display: write error: {:?}", e);
-            return Err(e);
-        } else {
-            Mono::delay(delay_ms.millis()).await;
-            let mut buf = [0u8; N];
-            match i2c::read(&*self.bus.access().await, 0x3C, &mut buf) {
-                Ok(()) => {
-                    return Ok(buf);
-                }
-                Err(e) => {
-                    defmt::error!("Display: read error: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
-    }
-}
-
-impl<'a> SSD1306Display<'a, Uninitialized> {
-    async fn test_display(&self) -> Result<(), crate::i2c::I2CError> {
-        match i2c::write(
-            &*self.bus.access().await,
-            0x3C,
-            &[
+impl SSD1306Display<Uninitialized> {
+    async fn configure_display(&self) -> Result<(), crate::i2c::I2CError> {
+        self.inner
+            .write(&[
                 0x00, // control byte: commands follow
                 0xAE, // display off while configuring
                 0xD5, 0x80, // clock divider / oscillator frequency (default)
@@ -69,47 +38,36 @@ impl<'a> SSD1306Display<'a, Uninitialized> {
                 0xA6, // normal, not inverted (0xA7 = inverted)
                 0x2E, // scrolling off
                 0xAF, // display on
-            ],
-        ) {
-            Ok(()) => {
-                defmt::info!("Display: write successful");
-            }
-            Err(e) => {
-                defmt::error!("Display: write error: {:?}", e);
-                return Err(e);
-            }
-        }
-        let mut buf = [0u8; 1025];
-        buf[0] = 0x40;
-        buf[1..].copy_from_slice(&drawings::ANGRY_FACE);
-        i2c::write(&*self.bus.access().await, 0x3C, &buf)?;
+            ])
+            .await?;
+
+        self.inner.write(&drawings::ANGRY_FACE).await?;
         Ok(())
     }
 
-    pub fn new(bus: &'a Arbiter<I2C1>) -> Self {
+    pub fn new(bus: &'static Arbiter<I2cBus>) -> Self {
         Self {
             _state: PhantomData::<Uninitialized>,
-            bus,
+            inner: I2CPeripheral::new(bus, SSD1306_I2C_ADDR),
         }
     }
 
-    pub async fn init(self) -> Result<SSD1306Display<'a, Initialized>, i2c::I2CError> {
+    pub async fn init(self) -> Result<SSD1306Display<Initialized>, i2c::I2CError> {
         defmt::info!("Display: initializing");
-        self.test_display().await?;
+        self.configure_display().await?;
         Ok(SSD1306Display {
             _state: PhantomData::<Initialized>,
-            bus: self.bus,
+            inner: self.inner,
         })
     }
 }
 
-impl<'a> SSD1306Display<'a, Initialized> {
+impl SSD1306Display<Initialized> {
     pub async fn draw(&self, frame: &drawings::Frame) -> Result<(), i2c::I2CError> {
-        let bus = &*self.bus.access().await; // hold the bus for window + pixels together
-        i2c::write(bus, 0x3C, &[0x00, 0x21, 0x00, 0x7F, 0x22, 0x00, 0x07])?;
-        let mut buf = [0u8; 1025];
-        buf[0] = 0x40;
-        buf[1..].copy_from_slice(frame);
-        i2c::write(bus, 0x3C, &buf)
+        self.inner
+            .write(&SSD1306_SET_FULL_WINDOW)
+            .await?;
+        self.inner.write(frame).await?;
+        Ok(())
     }
 }

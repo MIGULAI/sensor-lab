@@ -2,13 +2,15 @@
 
 pub mod driver;
 pub mod measurement;
+
+#[allow(dead_code)]
 pub enum Precision {
     High,
     Medium,
     Low,
 }
 
-#[allow(non_camel_case_types)]
+#[allow(non_camel_case_types, dead_code)]
 pub enum HeaterMode {
     // activate highest heater power & high precis. meas. (typ. 200mW @ 3.3V) for 1s
     High_1s,

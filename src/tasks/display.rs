@@ -7,21 +7,26 @@ use rtic_monotonics::systick::prelude::*;
 
 pub async fn display_task(mut cx: display_task::Context<'_>) {
     let bus = *cx.local.display_bus;
-    let display = match SSD1306Display::new(bus).init().await {
-        Ok(display) => display,
-        Err(e) => {
-            defmt::error!("Display: failed to initialize: {:?}", e);
-            return;
-        }
-    };
-    let mut fb = FrameBuffer::new();
     loop {
-        let state = cx.shared.state.lock(|state| state.clone());
-        all_in_one::render(&mut fb, &state);                      // no lock held while drawing
-        if let Err(e) = display.draw(&fb.0).await {
-            defmt::error!("Display: draw failed: {:?}", e);
+        let display = loop {
+            match SSD1306Display::new(bus).init().await {
+                Ok(display) => break display,
+                Err(e) => {
+                    defmt::error!("Display: failed to initialize: {:?}", e);
+                    Mono::delay(1000.millis()).await;
+                }
+            }
+        };
+        Mono::delay(1000.millis()).await; // wait for logo to show
+        let mut fb = FrameBuffer::new();
+        loop {
+            let state = cx.shared.state.lock(|state| state.clone());
+            all_in_one::render(&mut fb, &state); // no lock held while drawing
+            if let Err(e) = display.draw(&fb.0).await {
+                defmt::error!("Display: draw failed: {:?}", e);
+                break;
+            }
+            Mono::delay(1000.millis()).await;
         }
-        Mono::delay(1000.millis()).await;
-
     }
 }

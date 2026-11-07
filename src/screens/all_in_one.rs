@@ -13,8 +13,8 @@ pub fn render(fb: &mut FrameBuffer, state: &State) {
     let style = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
     let _ = fb.clear(BinaryColor::Off);
 
-    let sht = state.sht40_state.as_ref().and_then(|s| s.measurements.as_ref());
-    let bmp = state.bmp280_state.as_ref().and_then(|s| s.measurements.as_ref());
+    let sht = state.sht40_state.as_ref().filter(|s| !s.error).and_then(|s| s.measurements.as_ref());
+    let bmp = state.bmp280_state.as_ref().filter(|s| !s.error).and_then(|s| s.measurements.as_ref());
 
     let mut lines: [String<16>; 3] = Default::default();
     let _ = match sht {
